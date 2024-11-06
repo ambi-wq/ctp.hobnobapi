@@ -1,0 +1,1367 @@
+from django.shortcuts import render
+from .serializers import EventImageSerializer, EventSerializer, EventListSerializer, EventInvitationSerializer, PrivateEventSerializer, HostedEventSerializer, EventInterestedUsersSerializer
+from .serializers import CuratedEventsSerializer, EventCommentSerializer, CommentListSerializer, EventDetailsListSerializer, InterestedEventsSerializer, ImagesUploadSerializer
+from rest_framework import views
+from .models import Events, EventImages, CuratedEvents, EventComments, CurateImages, ImagesUpload, EventInterestedUsers
+from userprofile.models import ProfileDetails, UserPreference
+from matching.models import UserLocation, CloseFriendList, UserContacts
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.decorators import api_view
+from rest_framework import generics
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import filters
+import datetime
+from rest_framework.pagination import LimitOffsetPagination, PageNumberPagination
+from django.db.models import Q
+from django.contrib.gis.measure import D
+from django.contrib.auth.models import User
+from userprofile.serializers import ProfileDetailsSerializer
+from matching.serializers import ProfileDetailsDataSerializer, InterestedUserProfile
+from django.core.exceptions import ObjectDoesNotExist
+from rest_framework.exceptions import ValidationError, NotFound
+from rest_framework.renderers import JSONRenderer
+from hobnob.standard_response import success_response, error_response
+from django.contrib.gis.db.models.functions import Distance
+from urllib.parse import urlparse
+
+# Create your views here.
+
+
+class EventView(views.APIView):
+    def get(self, request, id):
+        # Get User
+        current_user = request.user
+        # if ProfileDetails.objects.filter(uuid=current_user).exists() and ProfileDetails.objects.get(uuid=current_user).active == True:
+        try:
+            event = Events.objects.get(event_id=id)
+            event_serializer = EventDetailsListSerializer(
+                event, context={'user': current_user})
+
+            if request.version == 'v1':
+                standard_response = success_response(event_serializer.data)
+                return Response(standard_response, status=status.HTTP_200_OK)
+            else:
+                return Response(event_serializer.data, status=status.HTTP_200_OK)
+        except Events.DoesNotExist as e:
+            if request.version == 'v1':
+                raise NotFound(detail="Event doesn't exist")
+            else:
+                return Response({"message": "Event doesn't exist"}, status=status.HTTP_404_NOT_FOUND)
+        # else:
+        #     return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def post(self, request):
+        user = request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+        # Get Dates
+            today = datetime.date.today()
+            yesterday = today - datetime.timedelta(days=1)
+
+            # Get Events Type
+            event_type = request.data['event_type']
+
+            if len(str(request.data.get('event_price'))) == 0:
+                del request.data['event_price']
+
+            if len(str(request.data.get('event_time_from'))) == 0:
+                del request.data['event_time_from']
+
+            if len(str(request.data.get('event_time_to'))) == 0:
+                del request.data['event_time_to']
+
+            if len(str(request.data.get('event_city'))) == 0:
+                del request.data['event_city']
+
+            # Check User Has Already Created Public Events which is yet to be
+            # if event_type == 'Private' or event_type == 'Close Friends':
+            #     is_public_events = False
+            # else:
+            #     is_public_events = Events.objects.filter(
+            #         user=user, event_type='Public', event_date__gt=yesterday).exists()
+
+            # if is_public_events:
+            #     error_msg = {
+            #         "message": "User cannot create more than one public events at a time"}
+            #     if request.version == 'v1':
+            #         standard_response = error_response(error_msg['message'])
+            #         return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+            #     else:
+            #         return Response(error_msg, status=status.HTTP_400_BAD_REQUEST)
+            # else:
+            # If not then allow to create new events
+            event = Events(user=user)
+            event_serializer = EventSerializer(event, data=request.data)
+
+            if event_serializer.is_valid():
+                event_serializer.save()
+
+                # event_id = Events.objects.get(
+                #     event_id=event_serializer.data['event_id'])
+
+                # Get Image URL Array
+                events_img_arr = request.data.get('event_img', [])
+
+                if len(events_img_arr) > 0:
+                    # Make for loop
+                    for evt_img in events_img_arr:
+                        print("evt_img", evt_img)
+                        if evt_img != "":
+                            img_record = ImagesUpload.objects.get(id = evt_img)
+                            print("img_record", img_record, img_record.event_img)
+                            # Create Object of Event Image
+                            # img_path = urlparse(img_record.event_img).path[7:]
+                            img_path = img_record.event_img
+                            event_img = EventImages.objects.create(
+                                event=event, event_img=img_path, image_type = img_record.image_type)
+
+                if request.version == 'v1':
+                    standard_response = success_response(event_serializer.data)
+                    return Response(standard_response, status=status.HTTP_201_CREATED)
+                else:
+                    return Response(event_serializer.data, status=status.HTTP_201_CREATED)
+            else:
+                if request.version == 'v1':
+                    standard_response = error_response(event_serializer.errors)
+                    return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    return Response(event_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def wput(self, request, id):
+        try:
+            user = request.user
+            if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+                event = Events.objects.get(event_id=id)
+                event_data = request.data
+
+                # Get Dates
+                today = datetime.date.today()
+                yesterday = today - datetime.timedelta(days=1)
+
+                if len(str(request.data.get('event_price'))) == 0:
+                    del request.data['event_price']
+
+                if len(str(request.data.get('event_time_from'))) == 0 or str(request.data.get('event_time_from')) == "null":
+                    del request.data['event_time_from']
+
+                if len(str(request.data.get('event_time_to'))) == 0 or str(request.data.get('event_time_to')) == "null":
+                    del request.data['event_time_to']
+
+                if len(str(request.data.get('event_city'))) == 0 or str(request.data.get('event_city')) == "null":
+                    del request.data['event_city']
+
+
+                # if "event_type" in event_data:
+                #     if event.event_type == "Private" and event_data['event_type'] == 'Public':
+                #         is_public_events = Events.objects.filter(
+                #             user=user, event_type='Public', event_date__gt=yesterday).exists()
+
+                #         if is_public_events:
+                #             error_msg = {
+                #                 "message": "User cannot create more than one public events at a time"}
+                #             if request.version == 'v1':
+                #                 standard_response = error_response(
+                #                     error_msg['message'])
+                #                 return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+                #             else:
+                #                 return Response(error_msg, status=status.HTTP_400_BAD_REQUEST)
+
+                if event.user == user:
+                    event_serializer = EventSerializer(
+                        event, data=request.data, partial=True)
+                    if event_serializer.is_valid():
+                        event_serializer.save()
+
+                        # Get Image URL Array
+                        events_img_arr = request.data.get('event_img', [])
+
+                        if len(events_img_arr) > 0:
+                            # Make for loop
+                            for evt_img in events_img_arr:
+
+                                if evt_img != "":
+                                    # Create Object of Event Image
+                                    img_path = urlparse(evt_img).path[7:]
+
+                                    # Check if img already exist
+                                    is_img_exist = EventImages.objects.filter(
+                                        event=event, event_img=img_path).exists()
+
+                                    if not is_img_exist:
+                                        event_img = EventImages.objects.create(
+                                            event=event, event_img=img_path)
+
+                        if request.version == 'v1':
+                            standard_response = success_response(
+                                event_serializer.data)
+                            return Response(standard_response, status=status.HTTP_200_OK)
+                        else:
+                            return Response(event_serializer.data, status=status.HTTP_200_OK)
+                    else:
+                        if request.version == 'v1':
+                            standard_response = error_response(
+                                event_serializer.errors)
+                            return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+                        else:
+                            return Response(event_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    error_msg = {
+                        "message": "User doesn't have permission to Update"}
+                    if request.version == 'v1':
+                        standard_response = error_response(error_msg['message'])
+                        return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+                    else:
+                        return Response(error_msg, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+        except Events.DoesNotExist as e:
+            if request.version == 'v1':
+                raise NotFound(detail="Event doesn't exist")
+            else:
+                return Response({"message": "Event doesn't exist"}, status=status.HTTP_404_NOT_FOUND)
+
+    def delete(self, request, id):
+        try:
+            user = request.user
+            if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+                event = Events.objects.get(event_id=id)
+
+                if event.user == user:
+                    event.delete()
+
+                    success_msg = {"message": "Event deleted successfully"}
+                    if request.version == 'v1':
+                        standard_response = success_response(
+                            success_msg['message'])
+                        return Response(standard_response, status=status.HTTP_200_OK)
+                    else:
+                        return Response(success_msg, status=status.HTTP_200_OK)
+                else:
+                    error_msg = {
+                        "message": "User doesn't have permission to delete"}
+                    if request.version == 'v1':
+                        standard_response = error_response(error_msg['message'])
+                        return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+                    else:
+                        return Response(error_msg, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+        except Events.DoesNotExist as e:
+            if request.version == 'v1':
+                raise NotFound(detail="Event doesn't exist")
+            else:
+                return Response({"message": "Event doesn't exist"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class PrivateEventsView(generics.ListAPIView):
+    model = Events
+    serializer_class = PrivateEventSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['event_name', 'location',
+                        'event_interest__interest_name', 'event_price']
+    search_fields = ['event_name',
+                     'event_interest__interest_name', 'event_price', 'user__user_profile__full_name', 'user__user_profile__username']
+    pagination_class = LimitOffsetPagination
+    renderer_classes = [JSONRenderer]
+
+    def get_queryset(self):
+        user = self.request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            interested_events = user.interested_user.all()
+
+            try:
+                # Get User Preference
+                user_preference = UserPreference.objects.filter(user=user)
+
+                if user_preference.count() > 0:
+                    # radius
+                    user_distance_preference = user_preference[0].radius
+                else:
+                    user_distance_preference = 50.0
+            except UserPreference.DoesNotExist as e:
+                raise NotFound(detail="User Preference doesn't exist")
+
+            # Get Dates
+            today = datetime.date.today()
+            yesterday = today - datetime.timedelta(days=1)
+
+            # Get Follower List
+            follower_list = UserContacts.objects.values_list(
+                'following', flat=True).filter(follower=user)
+            # print("follower_list",follower_list)
+
+            # Get Following List with filter those user return following
+            following_list = UserContacts.objects.values_list('follower').filter(
+                Q(following=user, follower__in=follower_list))
+
+            # Get Close Friend List
+            close_friend_list = CloseFriendList.objects.values_list(
+                'user', flat=True).filter(close_friend=user)
+
+            # CHeck User has selected some interest or not
+            # interested_users__display_pic
+            events_lists = self.model.objects.filter(Q(user=user, event_date__gt=yesterday, event_type='Private') | Q(user=user, event_date__gt=yesterday, event_type='Close Friends') | Q(event_type='Private', event_date__gt=yesterday, user__in=following_list) | Q(user__in=close_friend_list, event_date__gt=yesterday, event_type='Close Friends')).order_by(
+                "event_date").exclude(event_id__in=interested_events).prefetch_related('event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'user__user_profile', 'user__display_pic', 'images').distinct()
+
+            return events_lists
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def list(self, request, *args, **kwargs):
+        user = request.user
+        start_limit = int(self.request.query_params.get('offset', 0))
+        limit = int(self.request.query_params.get('limit', 20))
+        end_limit = start_limit + limit
+
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+
+        queryset_dict = {}
+        for event in queryset:
+            queryset_dict[event.event_id] = event
+
+        serializer = PrivateEventSerializer(
+            queryset, many=True, context={'user': user, 'qs': queryset_dict})
+
+        # Sorting functions
+        def is_creator(event): return event['is_creator']
+
+        # Updated Sorted Data
+        sorted_data = sorted(serializer.data, key=is_creator, reverse=True)
+
+        return self.get_paginated_response(sorted_data)
+
+
+class PublicEventsView(generics.ListAPIView):
+    model = Events
+    serializer_class = EventListSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['event_name', 'location',
+                        'event_interest__interest_name', 'event_price']
+    search_fields = ['event_name',
+                     'event_interest__interest_name', 'event_price', 'user__user_profile__full_name', 'user__user_profile__username']
+    pagination_class = LimitOffsetPagination
+    renderer_classes = [JSONRenderer]
+
+    def get_queryset(self):
+        user = self.request.user
+
+        interested_events = user.interested_user.all()
+
+        # try:
+        # Get User Profile
+        #     profile = ProfileDetails.objects.get(uuid=user)
+        # except ProfileDetails.DoesNotExist as e:
+        #     raise NotFound(detail="User Profile doesn't exist")
+
+        # Get all interest list of user
+        # interest_list = profile.interest.all()
+
+        # if len(interest_list) == 0:
+        #     raise NotFound(detail="User doesn't selected interest")
+
+        try:
+            # Get User Preference
+            user_preference = UserPreference.objects.filter(user=user)
+
+            if user_preference.count() > 0:
+                # radius
+                user_distance_preference = user_preference[0].radius
+            else:
+                user_distance_preference = 50.0
+        except UserPreference.DoesNotExist as e:
+            raise NotFound(detail="User Preference doesn't exist")
+
+        try:
+            # Get User Current Location
+            user_location = UserLocation.objects.get(user=user)
+
+        except UserLocation.DoesNotExist as e:
+            raise NotFound(detail="User Location doesn't exist")
+
+        # Get Dates
+        today = datetime.date.today()
+        yesterday = today - datetime.timedelta(days=1)
+
+        # Filter Events based on interest, location and date
+
+        # CHeck User has selected some interest or not
+
+        # events_lists = self.model.objects.filter(Q(user=user, event_date__gt=yesterday, event_type='Public') | Q(event_type='Public', event_date__gt=yesterday, event_location__distance_lte=(
+        #     user_location.last_location, D(km=user_distance_preference)))).annotate(distance=Distance("event_location", user_location.last_location)).exclude(interested_users__in=[user]).order_by("distance", "event_date").exclude(event_id__in=interested_events).prefetch_related('event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'images').distinct()
+
+        events_lists = self.model.objects.filter(Q(user=user, event_date__gt=yesterday, event_type='Public') | Q(event_type='Public', event_date__gt=yesterday, event_location__distance_lte=(
+            user_location.last_location, D(km=user_distance_preference)))).annotate(distance=Distance("event_location", user_location.last_location)).exclude(interested_users__in=[user]).order_by("event_date", "distance").exclude(event_id__in=interested_events).prefetch_related('event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'images').distinct()
+
+        # if len(interest_list) == 0:
+        #     events_lists = self.model.objects.filter(Q(user=user, event_date__gt=yesterday, event_type='Public') | Q(event_type='Public', event_date__gt=yesterday, event_location__distance_lte=(
+        #         user_location.last_location, D(km=user_distance_preference)))).annotate(distance=Distance("event_location", user_location.last_location)).exclude(interested_users__in=[user]).order_by("distance", "event_date").exclude(event_id__in=interested_events).prefetch_related('event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'images').distinct()
+        # else:
+        #     events_lists = self.model.objects.filter(Q(user=user, event_date__gt=yesterday, event_type='Public') | Q(event_interest__in=interest_list, event_type='Public', event_date__gt=yesterday, event_location__distance_lte=(
+        #         user_location.last_location, D(km=user_distance_preference)))).annotate(distance=Distance("event_location", user_location.last_location)).exclude(interested_users__in=[user]).order_by("distance", "event_date").exclude(event_id__in=interested_events).prefetch_related('event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'images').distinct()
+
+        # Q(user__in=close_friend_list, event_date__gt=yesterday, event_type='Private')
+
+        return events_lists
+
+    def list(self, request, *args, **kwargs):
+        user = request.user
+        start_limit = int(self.request.query_params.get('offset', 0))
+        limit = int(self.request.query_params.get('limit', 20))
+        end_limit = start_limit + limit
+
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+
+        queryset_dict = {}
+        for event in queryset:
+            queryset_dict[event.event_id] = event
+
+        serializer = self.serializer_class(
+            queryset, many=True, context={'user': user, 'qs': queryset_dict})
+
+        # Sorting functions
+        def is_creator(event): return event['is_creator']
+
+        # Updated Sorted Data
+        sorted_data = sorted(serializer.data, key=is_creator, reverse=True)
+
+        return self.get_paginated_response(sorted_data)
+
+# class ImageUploadView(generics.CreateAPIView):
+#     queryset = ImagesUpload.objects.all()
+#     serializer_class = ImagesUploadSerializer
+
+class EventInterestedUsersView(views.APIView):
+    model = EventInterestedUsers
+    serializer_class = EventInterestedUsersSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    pagination_class = LimitOffsetPagination
+    renderer_classes = [JSONRenderer]
+
+    def get(self, request, id):
+        user = self.request.user
+        print("id", id)
+        print("user", user)
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            print("profile details")
+            interested_events = self.model.objects.filter(event = (Events.objects.get(event_id = id)))
+            print("interested_events", interested_events)
+            serializer = self.serializer_class(
+                interested_events, many=True)
+            print("serializer", serializer.data)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class InterestedEventsView(generics.ListAPIView):
+    model = Events
+    serializer_class = InterestedEventsSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['event_name', 'location',
+                        'event_interest__interest_name', 'event_price']
+    search_fields = ['event_name', 'location',
+                     'event_interest__interest_name', 'event_price', 'user__user_profile__full_name', 'user__user_profile__username']
+    pagination_class = LimitOffsetPagination
+    renderer_classes = [JSONRenderer]
+
+    def get_queryset(self):
+        user = self.request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            # Get Dates
+            today = datetime.date.today()
+            yesterday = today - datetime.timedelta(days=1)
+
+            # Filter Events based on interest, location and date
+
+            # CHeck User has selected some interest or not
+            events_lists = self.model.objects.filter(interested_users__in=[user], event_date__gt=yesterday).order_by("event_date", "event_time_from").prefetch_related(
+                'event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'user__user_profile', 'user__display_pic', 'images').distinct()
+
+            return events_lists
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+    def list(self, request, *args, **kwargs):
+        user = request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            start_limit = int(self.request.query_params.get('offset', 0))
+            limit = int(self.request.query_params.get('limit', 20))
+            end_limit = start_limit + limit
+
+            queryset = self.filter_queryset(self.get_queryset())
+
+            page = self.paginate_queryset(queryset)
+
+            queryset_dict = {}
+            for event in queryset:
+                queryset_dict[event.event_id] = event
+
+            serializer = InterestedEventsSerializer(
+                queryset, many=True, context={'user': user, 'qs': queryset_dict})
+
+            return self.get_paginated_response(serializer.data)
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AllPublicEventsView(generics.ListAPIView):
+    model = Events
+    serializer_class = EventListSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['event_name', 'location',
+                        'event_interest__interest_name', 'event_price']
+    search_fields = ['event_name', 'location',
+                     'event_interest__interest_name', 'event_price', 'description', 'user__user_profile__full_name', 'user__user_profile__username']
+    pagination_class = LimitOffsetPagination
+    renderer_classes = [JSONRenderer]
+
+    def get_queryset(self):
+        user = self.request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            try:
+                # Get User Profile
+                profile = ProfileDetails.objects.get(uuid=user)
+            except ProfileDetails.DoesNotExist as e:
+                raise NotFound(detail="User Profile doesn't exist")
+
+            # Get all interest list of user
+            interest_list = profile.interest.all()
+
+            # if len(interest_list) == 0:
+            #     raise NotFound(detail="User doesn't selected interest")
+
+            try:
+                # Get User Preference
+                user_distance_preference = UserPreference.objects.get(
+                    user=user).radius
+            except UserPreference.DoesNotExist as e:
+                raise NotFound(detail="User Preference doesn't exist")
+
+            try:
+                # Get User Current Location
+                user_location = UserLocation.objects.get(user=user)
+
+            except UserLocation.DoesNotExist as e:
+                raise NotFound(detail="User Location doesn't exist")
+
+            # Get Dates
+            today = datetime.date.today()
+            yesterday = today - datetime.timedelta(days=1)
+
+            # Get Close Friend List
+            close_friend_list = CloseFriendList.objects.values_list(
+                'user', flat=True).filter(close_friend=user)
+
+            # Filter Events based on interest, location and date
+
+            # CHeck User has selected some interest or not
+            if len(interest_list) == 0:
+                events_lists = self.model.objects.filter(Q(user=user, event_date__gt=yesterday) | Q(event_type='Public', event_date__gt=yesterday, event_location__distance_lte=(
+                    user_location.last_location, D(km=user_distance_preference)))).annotate(distance=Distance("event_location", user_location.last_location)).order_by("distance", "event_date").prefetch_related('event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'images').distinct()
+            else:
+                events_lists = self.model.objects.filter(Q(user=user, event_date__gt=yesterday) | Q(event_interest__in=interest_list, event_type='Public', event_date__gt=yesterday, event_location__distance_lte=(
+                    user_location.last_location, D(km=user_distance_preference))) | Q(user__in=close_friend_list, event_date__gt=yesterday, event_type='Private')).prefetch_related('event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'images').distinct()
+
+            # Q(user__in=close_friend_list, event_date__gt=yesterday, event_type='Private')
+
+            return events_lists
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def list(self, request, *args, **kwargs):
+        user = request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            start_limit = int(self.request.query_params.get('offset', 0))
+            limit = int(self.request.query_params.get('limit', 20))
+            end_limit = start_limit + limit
+
+            queryset = self.filter_queryset(self.get_queryset())
+
+            page = self.paginate_queryset(queryset)
+
+            queryset_dict = {}
+            for event in queryset:
+                queryset_dict[event.event_id] = event
+
+            serializer = self.serializer_class(
+                queryset, many=True, context={'user': user, 'qs': queryset_dict})
+
+            # Sorting functions
+            def is_creator(event): return event['is_creator']
+
+            # Updated Sorted Data
+            sorted_data = sorted(serializer.data, key=is_creator, reverse=True)
+
+            return self.get_paginated_response(sorted_data)
+        else:
+                return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class UserEventsListView(generics.ListAPIView):
+    model = Events
+    serializer_class = EventDetailsListSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['event_name', 'location',
+                        'event_interest__interest_name']
+    search_fields = ['event_name', 'location',
+                     'event_interest__interest_name', 'description']
+    pagination_class = LimitOffsetPagination
+    renderer_classes = [JSONRenderer]
+
+    def get_queryset(self):
+        user = self.request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            self.events = self.model.objects.filter(user=user).distinct()
+            return self.events
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class EventImageView(views.APIView):
+    renderer_classes = [JSONRenderer]
+
+    def get(self, request, id):
+        try:
+            event_img = EventImages.objects.filter(event_id=id)
+            event_img_serializer = EventImageSerializer(event_img, many=True)
+
+            if request.version == 'v1':
+                standard_response = success_response(event_img_serializer.data)
+                return Response(standard_response, status=status.HTTP_200_OK)
+            else:
+                return Response(event_img_serializer.data, status=status.HTTP_200_OK)
+        except Events.DoesNotExist as e:
+            if request.version == 'v1':
+                raise NotFound(detail="Event doesn't exist")
+            else:
+                return Response({"message": "Event doesn't exist"}, status=status.HTTP_404_NOT_FOUND)
+
+    def post(self, request):
+        try:
+            user = request.user
+            if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+                event = Events.objects.get(event_id=request.data['event'])
+
+                if event.user == user:
+                    event_img = EventImages(event=event)
+                    event_img_serializer = EventImageSerializer(
+                        event_img, data=request.data)
+
+                    if event_img_serializer.is_valid():
+                        event_img_serializer.save()
+
+                        if request.version == 'v1':
+                            standard_response = success_response(
+                                event_img_serializer.data)
+                            return Response(standard_response, status=status.HTTP_201_CREATED)
+                        else:
+                            return Response(event_img_serializer.data, status=status.HTTP_201_CREATED)
+                    else:
+                        if request.version == 'v1':
+                            standard_response = error_response(
+                                event_img_serializer.errors)
+                            return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+                        else:
+                            return Response(event_img_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    error_msg = {
+                        "message": "User doesn't have permission to add image for this event."}
+                    if request.version == 'v1':
+                        standard_response = error_response(error_msg['message'])
+                        return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+                    else:
+                        return Response(error_msg, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+        except Events.DoesNotExist as e:
+            if request.version == 'v1':
+                raise NotFound(detail="Event doesn't exist")
+            else:
+                return Response({"message": "Event doesn't exist"}, status=status.HTTP_404_NOT_FOUND)
+
+    def delete(self, request, id):
+        try:
+            event_img = EventImages.objects.filter(pk=id)
+            event_img.delete()
+
+            # Success Msg
+            success_msg = {"message": "Image Deleted Successfully"}
+
+            if request.version == 'v1':
+                standard_response = success_response(success_msg['message'])
+                return Response(standard_response, status=status.HTTP_200_OK)
+            else:
+                return Response(success_msg, status=status.HTTP_200_OK)
+        except Events.DoesNotExist as e:
+            if request.version == 'v1':
+                raise NotFound(detail="Event doesn't exist")
+            else:
+                return Response({"message": "Event doesn't exist"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class ImageUploadView(generics.CreateAPIView):
+    queryset = ImagesUpload.objects.all()
+    serializer_class = ImagesUploadSerializer
+
+
+class AddEventUserInterested(views.APIView):
+
+    def post(self, request, event_id):
+        try:
+            user = request.user
+            if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+                event = Events.objects.get(event_id=event_id)
+                event.interested_users.add(user)
+                event.save()
+                
+
+                # Success Message
+                success_msg = {"message": "User Added to Event"}
+                if request.version == 'v1':
+                    standard_response = success_response(success_msg)
+                    return Response(standard_response, status=status.HTTP_200_OK)
+                else:
+                    return Response(success_msg, status=status.HTTP_200_OK)
+            else:
+                return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+        except Events.DoesNotExist as e:
+            if request.version == 'v1':
+                raise NotFound(detail="Event doesn't exist")
+            else:
+                return Response({"message": "Event doesn't exist"}, status=status.HTTP_404_NOT_FOUND)
+
+    def delete(self, request, event_id):
+        try:
+            user = request.user
+            if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+                event = Events.objects.get(event_id=event_id)
+                event.interested_users.remove(user)
+                event.save()
+
+                success_msg = {"message": "User Deleted from Event"}
+                if request.version == 'v1':
+                    standard_response = success_response(success_msg['message'])
+                    return Response(standard_response, status=status.HTTP_200_OK)
+                else:
+                    return Response(success_msg, status=status.HTTP_200_OK)
+            else:
+                return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+        except Events.DoesNotExist as e:
+            if request.version == 'v1':
+                raise NotFound(detail="Event doesn't exist")
+            else:
+                return Response({"message": "Event doesn't exist"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class UpcomingEventsListView(generics.ListAPIView):
+    model = Events
+    serializer_class = EventListSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['event_name', 'location',
+                        'event_interest__interest_name']
+    search_fields = ['event_name', 'location',
+                     'event_interest__interest_name', 'description']
+    pagination_class = LimitOffsetPagination
+    renderer_classes = [JSONRenderer]
+
+    def get_queryset(self):
+        user = self.request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            # Getting Today's date
+            today = datetime.date.today()
+            # Getting yesterday date for filtering events
+            yesterday = today - datetime.timedelta(days=1)
+
+            # Get Close Friend List
+            close_friend_list = CloseFriendList.objects.values_list(
+                'user', flat=True).filter(close_friend=user)
+
+            # Find Events user has created and events user has interested. Exclude all events which has date yesterday
+            self.events = self.model.objects.filter(Q(event_date__gt=yesterday), Q(
+                interested_users__in=[user]) | Q(invited_users__in=[user]) | Q(user__in=close_friend_list, event_date__gt=yesterday, event_type='Private')).prefetch_related('event_interest', 'interested_users', 'invited_users', 'user', 'interested_users__display_pic', 'interested_users__user_profile_image', 'images').distinct()
+
+            return self.events
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def list(self, request, *args, **kwargs):
+        user = request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            start_limit = int(self.request.query_params.get('offset', 0))
+            limit = int(self.request.query_params.get('limit', 20))
+            end_limit = start_limit + limit
+
+            queryset = self.filter_queryset(self.get_queryset())
+
+            page = self.paginate_queryset(queryset)
+
+            queryset_dict = {}
+            for event in queryset:
+                queryset_dict[event.event_id] = event
+
+            serializer = self.serializer_class(
+                queryset, many=True, context={'user': user, 'qs': queryset_dict})
+
+            return self.get_paginated_response(serializer.data[start_limit:end_limit])
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PastEventsListView(generics.ListAPIView):
+    model = Events
+    serializer_class = EventListSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['event_name', 'location',
+                        'event_interest__interest_name']
+    search_fields = ['event_name', 'location',
+                     'event_interest__interest_name', 'description']
+    pagination_class = LimitOffsetPagination
+    renderer_classes = [JSONRenderer]
+
+    def get_queryset(self):
+        user = self.request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            # Getting Today's date
+            today = datetime.date.today()
+            # Getting yesterday date for filtering events
+            yesterday = today - datetime.timedelta(days=1)
+
+            # Find Events user has created and events user has interested. Exclude all events which has date yesterday
+            self.events = self.model.objects.filter(Q(event_date__lt=today), Q(
+                user=user) | Q(interested_users__in=[user])).distinct().prefetch_related('event_interest', 'interested_users', 'invited_users', 'user', 'interested_users__user_profile', 'interested_users__display_pic', 'images').distinct()
+
+            return self.events
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+    def list(self, request, *args, **kwargs):
+        user = request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            start_limit = int(self.request.query_params.get('offset', 0))
+            limit = int(self.request.query_params.get('limit', 20))
+            end_limit = start_limit + limit
+
+            queryset = self.filter_queryset(self.get_queryset())
+
+            page = self.paginate_queryset(queryset)
+
+            queryset_dict = {}
+            for event in queryset:
+                queryset_dict[event.event_id] = event
+
+            serializer = self.serializer_class(
+                queryset, many=True, context={'user': user, 'qs': queryset_dict})
+
+            return self.get_paginated_response(serializer.data[start_limit:end_limit])
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+class GetInterestedUserList(views.APIView):
+    renderer_classes = [JSONRenderer]
+
+    def get(self, request, id):
+        try:
+            event = Events.objects.get(event_id=id)
+
+            # Get all interested user list
+            interested_users = event.interested_users.all()
+
+            # Create Pagination Instance
+            pagination = LimitOffsetPagination()
+
+            # Set Pagination Size
+            pagination.page_size = 20
+
+            # Get all profile details of interested user
+            profile_list = User.objects.filter(id__in=interested_users).prefetch_related(
+                'user_profile', 'user_profile_image', 'user_follower').distinct()
+
+            # Pass Pagination query
+            paginated_data = pagination.paginate_queryset(
+                profile_list, request)
+
+            # Convert to dictionary
+            queryset_dict = {}
+            for qs_data in profile_list:
+                queryset_dict[qs_data.id] = qs_data
+
+            # Serialize profile data
+            profile_details_serializer = InterestedUserProfile(
+                profile_list, many=True, context={'queryset': queryset_dict})
+
+            return pagination.get_paginated_response(profile_details_serializer.data)
+
+        except Events.DoesNotExist as e:
+            raise NotFound(detail="Event doesn't exist")
+        except ProfileDetails.DoesNotExist as e:
+            raise NotFound(detail="User Profile Not Found")
+
+
+class CuratedEventsListView(generics.ListCreateAPIView):
+    model = CuratedEvents
+    serializer_class = CuratedEventsSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['event_name',
+                        'description', 'categoery__interest_name']
+    search_fields = ['event_name']
+    pagination_class = LimitOffsetPagination
+    renderer_classes = [JSONRenderer]
+
+    def get_queryset(self):
+        # Make Curated Event Query with prefetch_related data
+        currated_events = CuratedEvents.objects.all(
+        ).prefetch_related('categoery', 'currated_images')
+
+        return currated_events
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+
+        queryset_dict = {}
+        for event in queryset:
+            queryset_dict[event.id] = event
+
+        serializer = CuratedEventsSerializer(
+            queryset, many=True, context={'qs': queryset_dict})
+
+        return self.get_paginated_response(serializer.data)
+
+
+class CuratedEventsView(generics.RetrieveAPIView):
+    queryset = CuratedEvents.objects.all()
+    serializer_class = CuratedEventsSerializer
+
+
+class SingleCommentView(views.APIView):
+
+    def get(self, request, id):
+        # Get User
+        current_user = request.user
+        if ProfileDetails.objects.filter(uuid=current_user).exists() and ProfileDetails.objects.get(uuid=current_user).active == True:
+            try:
+                # Get Comments based on ID
+                comments = EventComments.objects.get(comment_id=id)
+
+                # Serializer Data
+                comment_serializer = EventCommentSerializer(comments)
+
+                # Response User with serializer
+                if request.version == 'v1':
+                    standard_response = success_response(comment_serializer.data)
+                    return Response(standard_response, status=status.HTTP_200_OK)
+                else:
+                    return Response(comment_serializer.data, status=status.HTTP_200_OK)
+            except EventComments.DoesNotExist as e:
+                raise NotFound(detail="Event Comments doesn't exist")
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+    def post(self, request):
+        # Get User
+        current_user = request.user
+        if ProfileDetails.objects.filter(uuid=current_user).exists() and ProfileDetails.objects.get(uuid=current_user).active == True:
+            # Get Event ID
+            event_id = request.data['event']
+
+            # Check Events Type
+            event_type = Events.objects.get(event_id=event_id).event_type
+
+            # CHeck Event Type
+            if event_type == 'Private':
+                error_msg = {
+                    "message": "Cannot make comment on Private Event"}
+                if request.version == 'v1':
+                    standard_response = error_response(error_msg['message'])
+                    return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    return Response(error_msg, status=status.HTTP_400_BAD_REQUEST)
+
+            # Create Comment Instance
+            comment = EventComments(comment_user=current_user)
+
+            # Pass Comment Instance to Serializer
+            comment_serializer = EventCommentSerializer(comment, data=request.data)
+
+            # Check Validation of Comment Instace
+            if comment_serializer.is_valid():
+                # Save Resonse
+                comment_serializer.save()
+
+                # Return Valid Data Response
+                if request.version == 'v1':
+                    standard_response = success_response(comment_serializer.data)
+                    return Response(standard_response, status=status.HTTP_201_CREATED)
+                else:
+                    return Response(comment_serializer.data, status=status.HTTP_201_CREATED)
+
+            else:
+                # Return Error Response
+                if request.version == 'v1':
+                    standard_response = error_response(comment_serializer.errors)
+                    return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    return Response(comment_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+    def put(self, request, id):
+        # Get User
+        current_user = request.user
+        if ProfileDetails.objects.filter(uuid=current_user).exists() and ProfileDetails.objects.get(uuid=current_user).active == True:
+            try:
+                # Get Comments based on ID
+                comments = EventComments.objects.get(comment_id=id)
+
+                # Check COmment User and Current USer
+                if current_user == comments.comment_user:
+                    # Serializer Data
+                    comment_serializer = EventCommentSerializer(
+                        comments, data=request.data, partial=True)
+
+                    # Check Validation of Comment Instace
+                    if comment_serializer.is_valid():
+                        # Save Resonse
+                        comment_serializer.save()
+
+                        # Return Valid Data Response
+                        if request.version == 'v1':
+                            standard_response = success_response(
+                                comment_serializer.data)
+                            return Response(standard_response, status=status.HTTP_200_OK)
+                        else:
+                            return Response(comment_serializer.data, status=status.HTTP_200_OK)
+
+                    else:
+                        # Return Error Response
+                        if request.version == 'v1':
+                            standard_response = error_response(
+                                comment_serializer.errors)
+                            return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+                        else:
+                            return Response(comment_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                else:
+                    error_msg = {
+                        "message": "You don't have permission to edit this comment"}
+                    if request.version == 'v1':
+                        standard_response = error_response(error_msg['message'])
+                        return Response(standard_response, status=status.HTTP_401_UNAUTHORIZED)
+                    else:
+                        return Response(error_msg, status=status.HTTP_401_UNAUTHORIZED)
+
+            except EventComments.DoesNotExist as e:
+                raise NotFound(detail="Event Comments doesn't exist")
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+    def delete(self, request, id):
+        # Get User
+        current_user = request.user
+        if ProfileDetails.objects.filter(uuid=current_user).exists() and ProfileDetails.objects.get(uuid=current_user).active == True:
+            try:
+                # Get Comments based on ID
+                comments = EventComments.objects.get(comment_id=id)
+
+                # Verify Comment User & Delete User
+                if current_user == comments.comment_user:
+                    # Delete Comment
+                    comments.delete()
+
+                    # Response User with serializer
+                    standard_response = success_response(
+                        "Comment Deleted Succesfully")
+                    return Response(standard_response, status=status.HTTP_200_OK)
+                else:
+                    standard_response = error_response(
+                        "You don't have permission to delete this comment")
+                    return Response(standard_response, status=status.HTTP_401_UNAUTHORIZED)
+            except EventComments.DoesNotExist as e:
+                raise NotFound(detail="Event Comments doesn't exist")
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+class CommentsList(views.APIView):
+
+    def get(self, request, id):
+        try:
+            # Get Current User
+            current_user = request.user
+            if ProfileDetails.objects.filter(uuid=current_user).exists() and ProfileDetails.objects.get(uuid=current_user).active == True:
+            # Get Comments list with filter
+                comments_list = EventComments.objects.filter(reply=None, event=id).order_by('create_at').prefetch_related(
+                    'comment_user__user_profile', 'comment_user__display_pic', 'replies')
+
+                # Initiate Pagination
+                paginator = LimitOffsetPagination()
+
+                # Set Pagination Page Size
+                paginator.page_size = 50
+
+                # Pass Query to Pagination
+                result_page = paginator.paginate_queryset(comments_list, request)
+
+                # QUerySet
+                queryset_dict = {}
+                for comment in comments_list:
+                    queryset_dict[comment.comment_id] = comment
+
+                # Serializer
+                comment_serializer = CommentListSerializer(
+                    comments_list, many=True, context={'queryset': queryset_dict, 'current_user': current_user})
+
+                # Response
+                return paginator.get_paginated_response(comment_serializer.data)
+            else:
+                return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+        except EventComments.DoesNotExist as e:
+            raise NotFound(detail="Events Doesn't Exist")
+
+
+class CommentReplyList(views.APIView):
+
+    def get(self, request, id):
+        try:
+            # Get Current User
+            current_user = request.user
+            if ProfileDetails.objects.filter(uuid=current_user).exists() and ProfileDetails.objects.get(uuid=current_user).active == True:
+
+                # Get Comments list with filter
+                comments_list = EventComments.objects.filter(reply=id).order_by('create_at').prefetch_related(
+                    'comment_user__user_profile', 'comment_user__display_pic', 'replies')
+
+                # Initiate Pagination
+                paginator = LimitOffsetPagination()
+
+                # Set Pagination Page Size
+                paginator.page_size = 50
+
+                # Pass Query to Pagination
+                result_page = paginator.paginate_queryset(comments_list, request)
+
+                # QUerySet
+                queryset_dict = {}
+                for comment in comments_list:
+                    queryset_dict[comment.comment_id] = comment
+
+                # Serializer
+                comment_serializer = CommentListSerializer(
+                    comments_list, many=True, context={'queryset': queryset_dict, 'current_user': current_user})
+
+                # Response
+                return paginator.get_paginated_response(comment_serializer.data)
+            else:
+                return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+        except EventComments.DoesNotExist as e:
+            raise NotFound(detail="Events Doesn't Exist")
+
+
+class EventInvitationView(views.APIView):
+
+    def get(self, request, id):
+        # Get User
+        current_user = request.user
+        try:
+            if ProfileDetails.objects.filter(uuid=current_user).exists() and ProfileDetails.objects.get(uuid=current_user).active == True:
+                # Filter Events based on events id
+                events = Events.objects.get(event_id=id)
+
+                # Check if user is Event Creator
+                if current_user == events.user:
+                    # Get all invited User List
+                    invited_users = events.invited_users.all()
+
+                    # Pass User List to ProfileDetails Instance
+                    invited_user_profiles = User.objects.filter(id__in=invited_users).prefetch_related(
+                        'user_profile', 'user_profile_image', 'user_follower').distinct()
+
+                    # Create LimitOffset Pagination Instance
+                    pagination = LimitOffsetPagination()
+
+                    # Set Pagination Size
+                    pagination.page_size = 50
+
+                    # Pass all profile list to pagination function
+                    paginated_data = pagination.paginate_queryset(
+                        invited_user_profiles, request)
+
+                    # Convert to dictionary
+                    queryset_dict = {}
+                    for qs_data in invited_user_profiles:
+                        queryset_dict[qs_data.id] = qs_data
+
+                    # Pass data from pagination to data serializer function
+                    profile_serializer = InterestedUserProfile(
+                        paginated_data, many=True, context={'queryset': queryset_dict})
+
+                    # Response back with Pagination
+                    return pagination.get_paginated_response(profile_serializer.data)
+
+                # If user is not creator
+                else:
+                    # Response back with Unauthorization Error
+                    standard_response = error_response(
+                        "You don't have permission to see invitation list")
+                    return Response(standard_response, status=status.HTTP_401_UNAUTHORIZED)
+            else:
+                return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+            # If events Not exist
+        except Events.DoesNotExist as e:
+            # Response back with Data not found
+            raise NotFound(detail="Event doesn't exist")
+
+    def post(self, request, id):
+        # Get User
+        current_user = request.user
+        if ProfileDetails.objects.filter(uuid=current_user).exists() and ProfileDetails.objects.get(uuid=current_user).active == True:
+            # Get Invation user
+            invited_user = request.data['invited_users']
+
+            try:
+                # Filter Events based on events id
+                events = Events.objects.get(event_id=id)
+
+                print(current_user, events.user)
+
+                # Check if user is Event Creator
+                if current_user == events.user:
+
+                    # Remove User from Interested User
+                    events.interested_users.remove(invited_user)
+
+                    # Add User to Invited User
+                    events.invited_users.add(invited_user)
+
+                    # Response user
+                    standard_response = success_response(
+                        "You succesfully updated invitation list")
+                    return Response(standard_response, status=status.HTTP_200_OK)
+
+                # If user is not creator
+                else:
+                    # Response back with Unauthorization Error
+                    standard_response = error_response(
+                        "You don't have permission to add in invitation list")
+                    return Response(standard_response, status=status.HTTP_401_UNAUTHORIZED)
+
+            # If events Not exist
+            except Events.DoesNotExist as e:
+                # Response back with Data not found
+                raise NotFound(detail="Event doesn't exist")
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, id):
+        # Get User
+        current_user = request.user
+        if ProfileDetails.objects.filter(uuid=current_user).exists() and ProfileDetails.objects.get(uuid=current_user).active == True:
+
+            # Get Invation user
+            try:
+                invited_user = request.data['invited_users']
+            except:
+                standard_response = error_response("Add invited user id in body")
+                return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                # Filter Events based on events id
+                events = Events.objects.get(event_id=id)
+
+                # Check if user is Event Creator
+                if current_user == events.user:
+
+                    # Check user is in invitation list
+                    if invited_user in events.invited_users.all():
+
+                        # Remove User from Invited User
+                        events.invited_users.remove(invited_user)
+
+                        # Add User to Interested User
+                        events.interested_users.add(invited_user)
+
+                        # Response user
+                        standard_response = success_response(
+                            "You succesfully remove from invitation list")
+                        return Response(standard_response, status=status.HTTP_200_OK)
+                    else:
+                        # Send Invalid User Response
+                        raise NotFound(detail="User not exist in invitation list")
+
+                # If user is not creator
+                else:
+                    # Response back with Unauthorization Error
+                    standard_response = error_response(
+                        "You don't have permission to add in invitation list")
+                    return Response(standard_response, status=status.HTTP_400_BAD_REQUEST)
+
+            # If events Not exist
+            except Events.DoesNotExist as e:
+                # Response back with Data not found
+                raise NotFound(detail="Event doesn't exist")
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class HostedEventsView(generics.ListAPIView):
+    model = Events
+    serializer_class = PrivateEventSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['event_name', 'location',
+                        'event_interest__interest_name', 'event_price']
+    search_fields = ['event_name',
+                     'event_interest__interest_name', 'event_price', 'user__user_profile__full_name', 'user__user_profile__username']
+    pagination_class = LimitOffsetPagination
+    renderer_classes = [JSONRenderer]
+
+    def get_queryset(self):
+        user = self.request.user
+        if ProfileDetails.objects.filter(uuid=user).exists() and ProfileDetails.objects.get(uuid=user).active == True:
+            interested_events = user.interested_user.all()
+
+            # Get Dates
+            today = datetime.date.today()
+            yesterday = today - datetime.timedelta(days=1)
+
+            # CHeck User has selected some interest or not
+            # interested_users__display_pic
+            todays_events_lists = self.model.objects.filter(user=user, event_date=today).order_by(
+                "-event_date").prefetch_related('event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'user__user_profile', 'user__display_pic', 'images').distinct()
+
+            past_events_lists = self.model.objects.filter(user=user, event_date__lt=today).order_by(
+                "-event_date").prefetch_related('event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'user__user_profile', 'user__display_pic', 'images').distinct()
+
+            upcoming_events_lists = self.model.objects.filter(user=user, event_date__gt=today).order_by(
+                "-event_date").prefetch_related('event_interest', 'interested_users', 'interested_users__display_pic', 'invited_users', 'user', 'user__user_profile', 'user__display_pic', 'images').distinct()
+
+            events_lists = todays_events_lists | past_events_lists | upcoming_events_lists
+
+            return events_lists
+        else:
+            return Response({"message: User has no account"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def list(self, request, *args, **kwargs):
+        user = request.user
+        start_limit = int(self.request.query_params.get('offset', 0))
+        limit = int(self.request.query_params.get('limit', 20))
+        end_limit = start_limit + limit
+
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+
+        queryset_dict = {}
+        for event in queryset:
+            queryset_dict[event.event_id] = event
+
+        serializer = HostedEventSerializer(
+            queryset, many=True, context={'user': user, 'qs': queryset_dict})
+
+        # Sorting functions
+        def is_creator(event): return event['is_creator']
+        
+        # Updated Sorted Data
+        sorted_data = sorted(serializer.data, key=is_creator, reverse=True)
+
+        return self.get_paginated_response(sorted_data)
